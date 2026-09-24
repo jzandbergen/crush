@@ -1324,8 +1324,16 @@ func mcpTimeout(m config.MCPConfig) time.Duration {
 // hasUsableToken returns true if the saved OAuth token has an access
 // token that can be used or refreshed. A token with an empty access
 // token is structurally invalid and should be treated as missing.
+// A token that is already expired and has no refresh token can never
+// become usable again, so it is treated as missing too.
 func hasUsableToken(tok *oauth.Token) bool {
-	return tok != nil && tok.AccessToken != ""
+	if tok == nil || tok.AccessToken == "" {
+		return false
+	}
+	if tok.IsExpired() && tok.RefreshToken == "" {
+		return false
+	}
+	return true
 }
 
 // isOAuthInitErr returns true if the error indicates the OAuth token
@@ -1333,6 +1341,8 @@ func hasUsableToken(tok *oauth.Token) bool {
 //   - invalid_grant: expired or revoked refresh tokens
 //   - invalid_client: deleted or deactivated client registrations
 //   - "no token available": the handler had no cached token to use
+//   - "refresh token is not set": expired token with no refresh token
+//     (golang.org/x/oauth2's tokenRefresher error)
 //   - interactive authorization was required but withheld during startup
 func isOAuthInitErr(err error) bool {
 	if errors.Is(err, mcpoauth.ErrInteractiveAuthRequired) {
@@ -1345,7 +1355,8 @@ func isOAuthInitErr(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "invalid_grant") ||
 		strings.Contains(msg, "invalid_client") ||
-		strings.Contains(msg, "no token available")
+		strings.Contains(msg, "no token available") ||
+		strings.Contains(msg, "refresh token is not set")
 }
 
 // clearOAuthToken removes the persisted OAuth token for a named MCP
