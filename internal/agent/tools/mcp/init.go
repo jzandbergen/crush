@@ -1262,7 +1262,7 @@ func createTransport(ctx context.Context, cfg *config.ConfigStore, name string, 
 
 			// Normalize trailing slash for PRM discovery compatibility.
 			normalizedURL := strings.TrimSuffix(url, "/")
-			oauthHandler, oauthErr := mcpoauth.NewHandler(name, normalizedURL, m.OAuthToken, preregistered, tokenSaver, mcpoauth.IsInteractive(ctx), m.OAuthCallbackPort)
+			oauthHandler, oauthErr := mcpoauth.NewHandler(name, normalizedURL, m.OAuthToken, preregistered, tokenSaver, mcpoauth.IsInteractive(ctx), m.OAuthCallbackPort, m.OAuthTokenAuthMethod)
 			if oauthErr != nil {
 				return nil, nil, fmt.Errorf("failed to create OAuth handler for mcp %q: %w", name, oauthErr)
 			}
@@ -1333,7 +1333,7 @@ func createTransport(ctx context.Context, cfg *config.ConfigStore, name string, 
 
 			// Normalize trailing slash for PRM discovery compatibility.
 			normalizedURL := strings.TrimSuffix(url, "/")
-			handler, oauthErr := mcpoauth.NewHandler(name, normalizedURL, m.OAuthToken, preregistered, tokenSaver, mcpoauth.IsInteractive(ctx), m.OAuthCallbackPort)
+			handler, oauthErr := mcpoauth.NewHandler(name, normalizedURL, m.OAuthToken, preregistered, tokenSaver, mcpoauth.IsInteractive(ctx), m.OAuthCallbackPort, m.OAuthTokenAuthMethod)
 			if oauthErr != nil {
 				return nil, nil, fmt.Errorf("failed to create OAuth handler for mcp %q: %w", name, oauthErr)
 			}
