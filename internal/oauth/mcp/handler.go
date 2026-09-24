@@ -89,6 +89,11 @@ type Handler struct {
 	serverURL      string
 	onTokenRefresh func(*oauth.Token)
 
+	// authStyle is the token endpoint auth style forced by the
+	// oauth_token_auth_method config. AuthStyleAutoDetect means unset:
+	// the SDK and any saved registration decide, as before.
+	authStyle oauth2.AuthStyle
+
 	// suppressBrowser, when true, prevents openURL from being invoked
 	// (the authorization URL is still recorded and logged). Used when
 	// the flow is driven remotely, e.g. by a connected client that opens
@@ -115,7 +120,13 @@ func NewHandler(
 	onTokenRefresh func(*oauth.Token),
 	interactive bool,
 	callbackPort int,
+	tokenAuthMethod string,
 ) (*Handler, error) {
+	authStyle, err := tokenAuthStyle(tokenAuthMethod)
+	if err != nil {
+		return nil, err
+	}
+
 	receiver := &callbackReceiver{
 		serverName: serverName,
 		fixedPort:  callbackPort,
@@ -159,6 +170,7 @@ func NewHandler(
 		openURL:        browser.OpenURL,
 		interactive:    interactive,
 		onTokenRefresh: onTokenRefresh,
+		authStyle:      authStyle,
 	}
 	receiver.handler = h
 
@@ -190,12 +202,13 @@ func NewHandler(
 		// validation. Also rewrite internal-cluster redirects back to the
 		// external hostname so the flow works outside the cluster.
 		// Based on Bruno Krugel's fix from PR #3396.
-		Client: newOAuthMetadataClient(http.DefaultTransport, serverURL),
+		Client: newOAuthMetadataClient(newTokenAuthRoundTripper(http.DefaultTransport, authStyle), serverURL),
 		DynamicClientRegistrationConfig: &auth.DynamicClientRegistrationConfig{
 			Metadata: &oauthex.ClientRegistrationMetadata{
-				ClientName:   "Crush",
-				RedirectURIs: []string{redirectURL},
-				GrantTypes:   []string{"authorization_code", "refresh_token"},
+				ClientName:              "Crush",
+				RedirectURIs:            []string{redirectURL},
+				GrantTypes:              []string{"authorization_code", "refresh_token"},
+				TokenEndpointAuthMethod: tokenAuthMethod,
 			},
 		},
 	}
@@ -232,13 +245,17 @@ func NewHandler(
 			RefreshToken: savedToken.RefreshToken,
 			Expiry:       time.Unix(savedToken.ExpiresAt, 0),
 		}
+		restoredStyle := oauth2.AuthStyle(savedToken.Client.AuthStyle)
+		if authStyle != oauth2.AuthStyleAutoDetect {
+			restoredStyle = authStyle
+		}
 		oc := &oauth2.Config{
 			ClientID:     savedToken.Client.ClientID,
 			ClientSecret: savedToken.Client.ClientSecret,
 			Endpoint: oauth2.Endpoint{
 				AuthURL:   savedToken.Client.AuthURL,
 				TokenURL:  savedToken.Client.TokenURL,
-				AuthStyle: oauth2.AuthStyle(savedToken.Client.AuthStyle),
+				AuthStyle: restoredStyle,
 			},
 		}
 		base := oc.TokenSource(context.Background(), restored)
@@ -374,6 +391,9 @@ func (h *Handler) persist(cfg *oauth2.Config, tok *oauth2.Token) {
 			AuthURL:      cfg.Endpoint.AuthURL,
 			TokenURL:     cfg.Endpoint.TokenURL,
 			AuthStyle:    int(cfg.Endpoint.AuthStyle),
+		}
+		if h.authStyle != oauth2.AuthStyleAutoDetect {
+			out.Client.AuthStyle = int(h.authStyle)
 		}
 	}
 	h.onTokenRefresh(out)
@@ -784,4 +804,74 @@ func stripResourceParam(rawURL string) string {
 		slog.Debug("Stripped resource parameter from authorization URL")
 	}
 	return u.String()
+}
+
+// tokenAuthStyle maps an RFC 7591 token_endpoint_auth_method to the
+// oauth2 auth style used for token requests. An empty method returns
+// AuthStyleAutoDetect, which leaves the existing behavior untouched.
+func tokenAuthStyle(method string) (oauth2.AuthStyle, error) {
+	switch method {
+	case "":
+		return oauth2.AuthStyleAutoDetect, nil
+	case "none", "client_secret_post":
+		return oauth2.AuthStyleInParams, nil
+	case "client_secret_basic":
+		return oauth2.AuthStyleInHeader, nil
+	default:
+		return oauth2.AuthStyleAutoDetect, fmt.Errorf("unsupported oauth_token_auth_method %q (expected none, client_secret_post or client_secret_basic)", method)
+	}
+}
+
+// tokenAuthRoundTripper enforces AuthStyleInParams on token requests the
+// SDK sends during the authorization-code exchange. The SDK derives the
+// auth style from the registration response, and servers that ignore the
+// requested token_endpoint_auth_method would otherwise leave it at HTTP
+// Basic. Credentials found in a Basic header are moved into the form body.
+type tokenAuthRoundTripper struct {
+	base http.RoundTripper
+}
+
+func newTokenAuthRoundTripper(base http.RoundTripper, style oauth2.AuthStyle) http.RoundTripper {
+	if style != oauth2.AuthStyleInParams {
+		return base
+	}
+	return &tokenAuthRoundTripper{base: base}
+}
+
+func (rt *tokenAuthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	clientID, clientSecret, ok := req.BasicAuth()
+	if !ok || req.Method != http.MethodPost || req.Body == nil ||
+		!strings.HasPrefix(req.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
+		return rt.base.RoundTrip(req)
+	}
+	body, err := io.ReadAll(req.Body)
+	req.Body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("read token request body: %w", err)
+	}
+	form, err := url.ParseQuery(string(body))
+	if err != nil {
+		return nil, fmt.Errorf("parse token request body: %w", err)
+	}
+	// oauth2 URL-encodes Basic credentials (RFC 6749 section 2.3.1).
+	if v, err := url.QueryUnescape(clientID); err == nil {
+		clientID = v
+	}
+	if v, err := url.QueryUnescape(clientSecret); err == nil {
+		clientSecret = v
+	}
+	form.Set("client_id", clientID)
+	if clientSecret != "" {
+		form.Set("client_secret", clientSecret)
+	}
+	encoded := form.Encode()
+
+	out := req.Clone(req.Context())
+	out.Header.Del("Authorization")
+	out.Body = io.NopCloser(strings.NewReader(encoded))
+	out.ContentLength = int64(len(encoded))
+	out.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader(encoded)), nil
+	}
+	return rt.base.RoundTrip(out)
 }

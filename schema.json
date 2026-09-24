@@ -323,6 +323,15 @@
         "oauth_callback_port": {
           "type": "integer",
           "description": "Fixed localhost port for the OAuth callback"
+        },
+        "oauth_token_auth_method": {
+          "type": "string",
+          "enum": [
+            "none",
+            "client_secret_post",
+            "client_secret_basic"
+          ],
+          "description": "Token endpoint auth method to request during registration and use for token requests"
         }
       },
       "additionalProperties": false,

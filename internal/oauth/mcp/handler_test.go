@@ -35,6 +35,16 @@ type fakeASOpts struct {
 	// in the authorization response, and the SDK rejects the authorization
 	// if no issuer comes back.
 	issSupported bool
+	// registerAuthMethod overrides token_endpoint_auth_method in the
+	// /register response ("" => "none"). Use "-" to omit it entirely.
+	registerAuthMethod string
+	// rejectBasicAuth makes /token and /register answer 403 to any
+	// request carrying HTTP Basic credentials, like a Cloudflare Access
+	// policy in front of the authorization server.
+	rejectBasicAuth bool
+	// onRegister and onToken observe incoming requests.
+	onRegister func(body map[string]any)
+	onToken    func(r *http.Request)
 }
 
 // newFakeAS starts an httptest server speaking enough of the OAuth
@@ -80,13 +90,30 @@ func newFakeAS(t *testing.T, opts fakeASOpts) (base, mcpURL string) {
 			http.Error(w, "registration not supported", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, map[string]any{
-			"client_id":                  opts.clientID,
-			"token_endpoint_auth_method": "none",
-		})
+		if opts.onRegister != nil {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			opts.onRegister(body)
+		}
+		resp := map[string]any{"client_id": opts.clientID}
+		switch opts.registerAuthMethod {
+		case "":
+			resp["token_endpoint_auth_method"] = "none"
+		case "-":
+		default:
+			resp["token_endpoint_auth_method"] = opts.registerAuthMethod
+		}
+		writeJSON(w, resp)
 	})
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		if _, _, ok := r.BasicAuth(); ok && opts.rejectBasicAuth {
+			http.Error(w, "<html>Forbidden</html>", http.StatusForbidden)
+			return
+		}
 		_ = r.ParseForm()
+		if opts.onToken != nil {
+			opts.onToken(r)
+		}
 		access := opts.accessToken
 		if r.Form.Get("grant_type") == "refresh_token" && opts.refreshedToken != "" {
 			access = opts.refreshedToken
@@ -183,7 +210,7 @@ func TestHandler_FreshAuthorize(t *testing.T) {
 		mu.Lock()
 		saved = tok
 		mu.Unlock()
-	}, true, 0)
+	}, true, 0, "")
 	require.NoError(t, err)
 	t.Cleanup(h.Close)
 	h.openURL = browserRedirect("fresh-code")
@@ -222,7 +249,7 @@ func TestHandler_PreregisteredClientSkipsDCR(t *testing.T) {
 	var saved *oauth.Token
 	h, err := NewHandler("test", mcpURL, nil, preregistered, func(tok *oauth.Token) {
 		saved = tok
-	}, true, 0)
+	}, true, 0, "")
 	require.NoError(t, err)
 	t.Cleanup(h.Close)
 	h.openURL = browserRedirect("prereg-code")
@@ -254,7 +281,7 @@ func TestHandler_RestoreSkipsBrowser(t *testing.T) {
 		},
 	}
 
-	h, err := NewHandler("test", mcpURL, saved, nil, func(*oauth.Token) {}, false, 0)
+	h, err := NewHandler("test", mcpURL, saved, nil, func(*oauth.Token) {}, false, 0, "")
 	require.NoError(t, err)
 	t.Cleanup(h.Close)
 	h.openURL = func(string) error {
@@ -299,7 +326,7 @@ func TestHandler_RefreshPersists(t *testing.T) {
 		mu.Lock()
 		saver = tok
 		mu.Unlock()
-	}, false, 0)
+	}, false, 0, "")
 	require.NoError(t, err)
 	t.Cleanup(h.Close)
 	h.openURL = func(string) error {
@@ -382,7 +409,7 @@ func TestSavingTokenSource_NilInputs(t *testing.T) {
 // as an authorization failure rather than a captured token.
 func TestHandler_AuthorizeError(t *testing.T) {
 	base, mcpURL := newFakeAS(t, fakeASOpts{clientID: "c", accessToken: "a"})
-	h, err := NewHandler("test", mcpURL, nil, nil, func(*oauth.Token) {}, true, 0)
+	h, err := NewHandler("test", mcpURL, nil, nil, func(*oauth.Token) {}, true, 0, "")
 	require.NoError(t, err)
 	t.Cleanup(h.Close)
 
@@ -413,7 +440,7 @@ func TestHandler_AuthorizeError(t *testing.T) {
 // ErrInteractiveAuthRequired so the caller can surface a needs-auth state.
 func TestHandler_BackgroundAuthorizeRefused(t *testing.T) {
 	base, mcpURL := newFakeAS(t, fakeASOpts{clientID: "c", accessToken: "a"})
-	h, err := NewHandler("test", mcpURL, nil, nil, func(*oauth.Token) {}, false, 0)
+	h, err := NewHandler("test", mcpURL, nil, nil, func(*oauth.Token) {}, false, 0, "")
 	require.NoError(t, err)
 	t.Cleanup(h.Close)
 	h.openURL = func(string) error {
@@ -431,7 +458,7 @@ func TestHandler_BackgroundAuthorizeRefused(t *testing.T) {
 // returned restore function re-enables the browser.
 func TestHandler_BrowserSuppressed(t *testing.T) {
 	base, mcpURL := newFakeAS(t, fakeASOpts{clientID: "c", accessToken: "a"})
-	h, err := NewHandler("test", mcpURL, nil, nil, func(*oauth.Token) {}, true, 0)
+	h, err := NewHandler("test", mcpURL, nil, nil, func(*oauth.Token) {}, true, 0, "")
 	require.NoError(t, err)
 	t.Cleanup(h.Close)
 
@@ -662,7 +689,7 @@ func TestHandler_PassesIssuerThrough(t *testing.T) {
 		accessToken:  "a",
 		issSupported: true,
 	})
-	h, err := NewHandler("test", mcpURL, nil, nil, func(*oauth.Token) {}, true, 0)
+	h, err := NewHandler("test", mcpURL, nil, nil, func(*oauth.Token) {}, true, 0, "")
 	require.NoError(t, err)
 	t.Cleanup(h.Close)
 
@@ -688,7 +715,7 @@ func TestHandler_RejectsWrongIssuer(t *testing.T) {
 		accessToken:  "a",
 		issSupported: true,
 	})
-	h, err := NewHandler("test", mcpURL, nil, nil, func(*oauth.Token) {}, true, 0)
+	h, err := NewHandler("test", mcpURL, nil, nil, func(*oauth.Token) {}, true, 0, "")
 	require.NoError(t, err)
 	t.Cleanup(h.Close)
 
@@ -743,7 +770,7 @@ func TestConnect_OneLoginOpensOneTab(t *testing.T) {
 	})
 	endpoint := newFakeMCP(t, authServer)
 
-	h, err := NewHandler("test", endpoint, nil, nil, func(*oauth.Token) {}, true, 0)
+	h, err := NewHandler("test", endpoint, nil, nil, func(*oauth.Token) {}, true, 0, "")
 	require.NoError(t, err)
 	t.Cleanup(h.Close)
 
@@ -763,4 +790,179 @@ func TestConnect_OneLoginOpensOneTab(t *testing.T) {
 
 	require.Equal(t, int64(1), opens.Load(), "one login must open exactly one browser tab")
 	require.NotNil(t, h.Token(), "the login must yield a usable token")
+}
+
+// tokenRequest captures what the fake /token endpoint received.
+type tokenRequest struct {
+	basicUser string
+	hasBasic  bool
+	clientID  string
+	grantType string
+}
+
+func recordTokens(mu *sync.Mutex, dst *[]tokenRequest) func(*http.Request) {
+	return func(r *http.Request) {
+		user, _, ok := r.BasicAuth()
+		mu.Lock()
+		defer mu.Unlock()
+		*dst = append(*dst, tokenRequest{
+			basicUser: user,
+			hasBasic:  ok,
+			clientID:  r.PostForm.Get("client_id"),
+			grantType: r.PostForm.Get("grant_type"),
+		})
+	}
+}
+
+// TestHandler_TokenAuthMethodUnsetKeepsDefault guards the default: with
+// no oauth_token_auth_method, registration does not request a method and
+// a server that omits it in the response still gets HTTP Basic, exactly
+// as before the option existed.
+func TestHandler_TokenAuthMethodUnsetKeepsDefault(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		reg      map[string]any
+		requests []tokenRequest
+	)
+	base, mcpURL := newFakeAS(t, fakeASOpts{
+		clientID:           "default-client",
+		accessToken:        "default-access",
+		registerAuthMethod: "-",
+		onRegister: func(body map[string]any) {
+			mu.Lock()
+			reg = body
+			mu.Unlock()
+		},
+		onToken: recordTokens(&mu, &requests),
+	})
+
+	h, err := NewHandler("test", mcpURL, nil, nil, func(*oauth.Token) {}, true, 0, "")
+	require.NoError(t, err)
+	t.Cleanup(h.Close)
+	h.openURL = browserRedirect("default-code")
+
+	require.NoError(t, authorizeWith401(t, h, base, mcpURL))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotContains(t, reg, "token_endpoint_auth_method")
+	require.Len(t, requests, 1)
+	require.True(t, requests[0].hasBasic, "default must keep HTTP Basic")
+	require.Equal(t, "default-client", requests[0].basicUser)
+}
+
+// TestHandler_TokenAuthMethodNone covers a token endpoint behind a proxy
+// that rejects HTTP Basic (e.g. Cloudflare Access). With "none", Crush
+// registers as a public client and sends client_id in the body, even when
+// the server ignores the requested method in its registration response.
+func TestHandler_TokenAuthMethodNone(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		reg      map[string]any
+		requests []tokenRequest
+		saved    *oauth.Token
+	)
+	base, mcpURL := newFakeAS(t, fakeASOpts{
+		clientID:           "public-client",
+		accessToken:        "public-access",
+		refreshToken:       "public-refresh",
+		registerAuthMethod: "-",
+		rejectBasicAuth:    true,
+		onRegister: func(body map[string]any) {
+			mu.Lock()
+			reg = body
+			mu.Unlock()
+		},
+		onToken: recordTokens(&mu, &requests),
+	})
+
+	h, err := NewHandler("test", mcpURL, nil, nil, func(tok *oauth.Token) {
+		mu.Lock()
+		saved = tok
+		mu.Unlock()
+	}, true, 0, "none")
+	require.NoError(t, err)
+	t.Cleanup(h.Close)
+	h.openURL = browserRedirect("public-code")
+
+	require.NoError(t, authorizeWith401(t, h, base, mcpURL))
+
+	ts, err := h.TokenSource(t.Context())
+	require.NoError(t, err)
+	tok, err := ts.Token()
+	require.NoError(t, err)
+	require.Equal(t, "public-access", tok.AccessToken)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, "none", reg["token_endpoint_auth_method"])
+	require.Len(t, requests, 1)
+	require.False(t, requests[0].hasBasic)
+	require.Equal(t, "public-client", requests[0].clientID)
+	require.NotNil(t, saved)
+	require.Equal(t, int(oauth2.AuthStyleInParams), saved.Client.AuthStyle,
+		"the configured style must be persisted for later refreshes")
+}
+
+// TestHandler_TokenAuthMethodOverridesSavedStyle proves the option fixes a
+// registration saved by an earlier version: a restored token whose client
+// was stored with HTTP Basic refreshes with client_id in the body instead.
+func TestHandler_TokenAuthMethodOverridesSavedStyle(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		requests []tokenRequest
+	)
+	base, mcpURL := newFakeAS(t, fakeASOpts{
+		refreshedToken:  "refreshed-access",
+		refreshToken:    "next-refresh",
+		rejectBasicAuth: true,
+		onToken:         recordTokens(&mu, &requests),
+	})
+
+	saved := &oauth.Token{
+		AccessToken:  "stale-access",
+		RefreshToken: "old-refresh",
+		ExpiresAt:    time.Now().Add(-time.Hour).Unix(),
+		Client: &oauth.OAuthClient{
+			ClientID:  "saved-client",
+			AuthURL:   base + "/authorize",
+			TokenURL:  base + "/token",
+			AuthStyle: int(oauth2.AuthStyleInHeader),
+		},
+	}
+
+	h, err := NewHandler("test", mcpURL, saved, nil, func(*oauth.Token) {}, false, 0, "none")
+	require.NoError(t, err)
+	t.Cleanup(h.Close)
+
+	ts, err := h.TokenSource(t.Context())
+	require.NoError(t, err)
+	tok, err := ts.Token()
+	require.NoError(t, err)
+	require.Equal(t, "refreshed-access", tok.AccessToken)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, requests, 1)
+	require.Equal(t, "refresh_token", requests[0].grantType)
+	require.False(t, requests[0].hasBasic)
+	require.Equal(t, "saved-client", requests[0].clientID)
+}
+
+func TestHandler_TokenAuthMethodInvalid(t *testing.T) {
+	_, err := NewHandler("test", "http://127.0.0.1/mcp", nil, nil, nil, false, 0, "private_key_jwt")
+	require.ErrorContains(t, err, "unsupported oauth_token_auth_method")
+}
+
+func TestTokenAuthStyle(t *testing.T) {
+	for method, want := range map[string]oauth2.AuthStyle{
+		"":                    oauth2.AuthStyleAutoDetect,
+		"none":                oauth2.AuthStyleInParams,
+		"client_secret_post":  oauth2.AuthStyleInParams,
+		"client_secret_basic": oauth2.AuthStyleInHeader,
+	} {
+		got, err := tokenAuthStyle(method)
+		require.NoError(t, err, method)
+		require.Equal(t, want, got, method)
+	}
 }

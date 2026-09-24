@@ -265,6 +265,13 @@ type MCPConfig struct {
 	// Crush picks the first free port from its default range.
 	OAuthCallbackPort int `json:"oauth_callback_port,omitempty" jsonschema:"description=Fixed localhost port for the OAuth callback, required by providers that enforce exact-match redirect URIs"`
 
+	// OAuthTokenAuthMethod selects how Crush authenticates to the token
+	// endpoint (RFC 7591 token_endpoint_auth_method). When empty, Crush
+	// keeps its default behavior. Set it to "none" or
+	// "client_secret_post" for servers, or proxies in front of them,
+	// that reject HTTP Basic credentials on the token endpoint.
+	OAuthTokenAuthMethod string `json:"oauth_token_auth_method,omitempty" jsonschema:"description=Token endpoint auth method to request during registration and use for token requests,enum=none,enum=client_secret_post,enum=client_secret_basic"`
+
 	// OAuthToken is the persisted OAuth token for this server. It is
 	// managed internally and stored in the global data config.
 	OAuthToken *oauth.Token `json:"oauth_token,omitempty" jsonschema:"-"`
