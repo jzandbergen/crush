@@ -389,6 +389,15 @@
         "channel_reply": {
           "$ref": "#/$defs/MCPChannelReply",
           "description": "Automatically route replies for turns originating from this channel back through one of the server's tools"
+        },
+        "oauth_token_auth_method": {
+          "type": "string",
+          "enum": [
+            "none",
+            "client_secret_post",
+            "client_secret_basic"
+          ],
+          "description": "Token endpoint auth method to request during registration and use for token requests"
         }
       },
       "additionalProperties": false,

@@ -477,6 +477,25 @@ and authenticates as the specified client. When omitted, Crush attempts
 dynamic registration automatically (works with Linear, Notion, and other
 servers that support RFC 7591).
 
+Some token endpoints, or proxies in front of them such as Cloudflare
+Access, reject client credentials sent as HTTP Basic auth. Set
+`oauth_token_auth_method` to `none` (public client) or
+`client_secret_post` to send them in the request body instead. When
+unset, Crush keeps its default behavior:
+
+```json
+{
+  "mcp": {
+    "portal": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp",
+      "oauth": true,
+      "oauth_token_auth_method": "none"
+    }
+  }
+}
+```
+
 #### Sessionless servers
 
 Some HTTP MCP servers are sessionless — they never issue a

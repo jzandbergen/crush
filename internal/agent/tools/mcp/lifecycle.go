@@ -185,7 +185,8 @@ func mcpConfigEqual(a, b config.MCPConfig) bool {
 		a.OAuthClientID == b.OAuthClientID &&
 		a.OAuthClientSecret == b.OAuthClientSecret &&
 		a.OAuthCallbackPort == b.OAuthCallbackPort &&
-		a.ChannelEnabled == b.ChannelEnabled
+		a.ChannelEnabled == b.ChannelEnabled &&
+		a.OAuthTokenAuthMethod == b.OAuthTokenAuthMethod
 }
 
 // boolPtrEqual compares two *bool by value, treating two nils as equal.
